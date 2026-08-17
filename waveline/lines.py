@@ -118,24 +118,52 @@ class SeriesRCLoad:
 
 
 class TLineFDTD:
-    """Leapfrog FDTD solver for a uniform lossy transmission line."""
+    """Leapfrog FDTD solver for a lossy transmission line, optionally built
+    from several concatenated segments of different characteristic
+    impedance/velocity (e.g. a short lead-wire stub spliced onto the main
+    coax). Segments share one uniform spatial grid; the impedance step at a
+    segment junction produces a real, physical partial reflection there --
+    no extra boundary machinery is needed for it, only the two true ends
+    (source and load) get the lumped-element treatment.
+    """
 
-    def __init__(self, Z0: float, vf: float, length: float, source: Source,
-                 load, n_seg: int = 200, cfl: float = 0.9,
-                 atten_db_per_m: float = 0.0):
-        self.Z0 = Z0
-        self.v = vf * C_LIGHT
-        self.length = length
-        self.Lp = Z0 / self.v          # H/m
-        self.Cp = 1.0 / (Z0 * self.v)  # F/m
-        # series R' per length from an attenuation figure (nepers/m ~ dB/m*0.1151)
-        alpha_np_per_m = atten_db_per_m * 0.115_129_25
-        self.Rp = 2.0 * alpha_np_per_m * Z0
+    def __init__(self, Z0: float = None, vf: float = None, length: float = None,
+                 source: Source = None, load=None, n_seg: int = 200,
+                 cfl: float = 0.9, atten_db_per_m: float = 0.0, segments=None):
+        if segments is None:
+            segments = [dict(length=length, Z0=Z0, vf=vf, atten_db_per_m=atten_db_per_m)]
+        self.segments = segments
+        self.length = sum(s["length"] for s in segments)
 
         self.N = n_seg
-        self.dx = length / n_seg
-        self.dt = cfl * self.dx / self.v
-        self.x = np.linspace(0.0, length, n_seg + 1)
+        self.dx = self.length / n_seg
+        self.x = np.linspace(0.0, self.length, n_seg + 1)
+
+        # per-branch (cell) material properties, assigned by which segment
+        # each branch's midpoint falls into
+        branch_mid = self.x[:-1] + self.dx / 2.0
+        seg_end = np.cumsum([s["length"] for s in segments])
+        seg_start = np.concatenate([[0.0], seg_end[:-1]])
+        Lp = np.empty(n_seg)
+        Cp = np.empty(n_seg)
+        Rp = np.empty(n_seg)
+        v_of_branch = np.empty(n_seg)
+        self.junctions = list(seg_end[:-1])  # internal segment boundaries (for plotting)
+        for s, x0, x1 in zip(segments, seg_start, seg_end):
+            mask = (branch_mid >= x0) & (branch_mid < x1 + 1e-12)
+            v_s = s["vf"] * C_LIGHT
+            Lp[mask] = s["Z0"] / v_s
+            Cp[mask] = 1.0 / (s["Z0"] * v_s)
+            alpha_np_per_m = s.get("atten_db_per_m", 0.0) * 0.115_129_25
+            Rp[mask] = 2.0 * alpha_np_per_m * s["Z0"]
+            v_of_branch[mask] = v_s
+        self.Lp, self.Cp, self.Rp = Lp, Cp, Rp
+        self.Z0 = segments[0]["Z0"]     # characteristic impedance at the source end
+        self.Z0_load = segments[-1]["Z0"]  # characteristic impedance at the load end
+        self.v = v_of_branch[0]          # velocity at the source end (used for CFL display etc.)
+
+        v_max = v_of_branch.max()
+        self.dt = cfl * self.dx / v_max
 
         self.V = np.zeros(n_seg + 1)
         self.I = np.zeros(n_seg)
@@ -143,13 +171,14 @@ class TLineFDTD:
 
         self.source = source
         self.load = load
-        Ch = self.Cp * self.dx / 2.0
-        self.source.prepare(self.dt, Ch)
-        self.load.prepare(self.dt, Ch)
+        Ch0 = Cp[0] * self.dx / 2.0
+        ChN = Cp[-1] * self.dx / 2.0
+        self.source.prepare(self.dt, Ch0)
+        self.load.prepare(self.dt, ChN)
 
-        self._Lseg = self.Lp * self.dx
-        self._Rseg = self.Rp * self.dx
-        self._Cseg = self.Cp * self.dx
+        self._Lseg = Lp * self.dx
+        self._Rseg = Rp * self.dx
+        self._Cseg_interior = 0.5 * self.dx * (Cp[:-1] + Cp[1:])
 
     def step(self):
         dt = self.dt
@@ -158,8 +187,9 @@ class TLineFDTD:
         # branch currents (interior wave update)
         I += dt * ((V[:-1] - V[1:]) - self._Rseg * I) / self._Lseg
 
-        # interior node voltages
-        V[1:-1] += dt * (I[:-1] - I[1:]) / self._Cseg
+        # interior node voltages (half-cell capacitance from each side --
+        # reduces to the uniform-line formula when both sides match)
+        V[1:-1] += dt * (I[:-1] - I[1:]) / self._Cseg_interior
 
         t_new = self.t + dt
         V[0] = self.source.step(V[0], I[0], t_new)

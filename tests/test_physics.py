@@ -69,14 +69,51 @@ def test_fdtd_settles_to_exact_frequency_domain_steady_state():
 
 
 def test_unterminated_square_wave_rings():
-    """No series resistor: near-total reflection at both ends should produce
-    ringing well beyond the incident step amplitude."""
-    src = sc.make_square_source("none_0")
+    """Bare op-amp output (~5 ohm, no added resistor): near-total reflection
+    at both ends should produce ringing well beyond the incident step
+    amplitude."""
+    src = sc.make_square_source("low_5")
     load = sc.make_daq_load()
     tl = lines.TLineFDTD(sc.Z0, sc.VF, sc.CABLE_LENGTH, src, load, n_seg=150,
                           cfl=0.9, atten_db_per_m=sc.atten_db_per_m(sc.F_SQUARE))
     res = tl.run(t_end=2e-6, record_every=1)
     assert np.max(np.abs(res["Vout"])) > 0.3  # source amplitude is 0.25 V
+
+
+def test_cascade_segment_junction_gives_clean_partial_reflection():
+    """Two segments of different Z0, each terminated (at source/load) in its
+    OWN local characteristic impedance: the only reflection event is at the
+    internal Z0 junction. With Rs=Z0_1 and RL=Z0_2 there's no re-reflection
+    at either true end, so the step settles in exactly one forward + one
+    reflected pass, with no ringing, to the classic resistive-divider value
+    Vs*Z0_2/(Z0_1+Z0_2) (matched terminations make a lossless line "vanish"
+    at low frequency/DC, regardless of any internal impedance step)."""
+    Z1, Z2 = 50.0, 100.0
+    segments = [
+        dict(length=3.0, Z0=Z1, vf=0.66, atten_db_per_m_ref=0.0, f_ref=1e6),
+        dict(length=3.0, Z0=Z2, vf=0.66, atten_db_per_m_ref=0.0, f_ref=1e6),
+    ]
+    src = lines.Source(smoothed_step, Rs=Z1, Ls=0.0)
+    load = lines.ResistiveLoad(R=Z2)
+    tl = lines.TLineFDTD(source=src, load=load, n_seg=300, cfl=0.9, segments=segments)
+    res = tl.run(t_end=200e-9, record_every=2)
+    va = res["Va"]
+    expected = Z2 / (Z1 + Z2)  # = 2/3 for a unit step
+    assert abs(va[-1] - expected) < 0.01
+    assert va.max() < expected + 0.01  # no overshoot/ringing
+
+
+def test_cascade_freqdomain_matches_matched_termination_limit():
+    """At a frequency low enough that the line is electrically negligible,
+    the cascade input impedance of a matched-terminated line should just
+    equal the termination resistance, independent of any internal Z0 step
+    (the standard 'a matched line disappears at DC' fact)."""
+    segments = [
+        dict(length=3.0, Z0=50.0, vf=0.66, atten_db_per_m_ref=0.0, f_ref=1e6),
+        dict(length=3.0, Z0=100.0, vf=0.66, atten_db_per_m_ref=0.0, f_ref=1e6),
+    ]
+    Zin = fd.cascade_input_impedance(segments, freq=1.0, ZL=100.0)
+    assert abs(Zin - 100.0) < 1e-3
 
 
 def test_matched_series_resistor_suppresses_ringing():
@@ -98,5 +135,7 @@ if __name__ == "__main__":
     test_open_load_gives_voltage_doubling()
     test_fdtd_settles_to_exact_frequency_domain_steady_state()
     test_unterminated_square_wave_rings()
+    test_cascade_segment_junction_gives_clean_partial_reflection()
+    test_cascade_freqdomain_matches_matched_termination_limit()
     test_matched_series_resistor_suppresses_ringing()
     print("ALL SANITY TESTS PASSED")

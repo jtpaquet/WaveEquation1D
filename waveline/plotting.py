@@ -27,23 +27,39 @@ def _wrap_title(s, width=62):
     return "\n".join(textwrap.wrap(s, width=width))
 
 
-def _elec_length_note(f0, vf, length, width=78):
-    v = vf * C_LIGHT
-    wavelength = v / f0
-    deg = 360.0 * f0 * length / v
-    if deg < 30:
-        s = (f"electrical length at {f0/1e3:.0f} kHz: {deg:.1f}°  "
-             f"(cable {length:.0f} m vs. λ={wavelength:.0f} m — electrically short, "
-             f"so the spatial profile barely varies; the reflections show up in TIME instead)")
+def _elec_length_note(f0, segments, width=78):
+    """segments: list of dicts with 'length' (m), 'Z0' (ohm), 'vf'."""
+    total_deg = 0.0
+    parts = []
+    for s in segments:
+        v = s["vf"] * C_LIGHT
+        deg = 360.0 * f0 * s["length"] / v
+        total_deg += deg
+        length_str = f"{s['length']*100:.0f} cm" if s["length"] < 1 else f"{s['length']:.0f} m"
+        parts.append(f"{length_str} @ Z0={s['Z0']:.0f}Ω")
+    breakdown = " + ".join(parts)
+    if total_deg < 30:
+        s = (f"electrical length at {f0/1e3:.0f} kHz: {total_deg:.1f}° total ({breakdown}) "
+             f"— electrically short, so the spatial profile barely varies; the reflections "
+             f"show up in TIME instead")
     else:
-        s = (f"electrical length at {f0/1e3:.0f} kHz: {deg:.0f}°  "
-             f"(cable {length:.0f} m vs. λ={wavelength:.0f} m)")
+        s = f"electrical length at {f0/1e3:.0f} kHz: {total_deg:.0f}° total ({breakdown})"
     return "\n".join(textwrap.wrap(s, width=width))
+
+
+def _draw_junctions(ax, junctions, y_inside):
+    """Mark internal segment (Z0 step) boundaries with a dotted line and a
+    label placed just inside the top of the axes, clear of the source/load
+    Gamma annotations which sit just above the axes."""
+    for xj in junctions:
+        ax.axvline(xj, color="0.55", ls=":", lw=1.1)
+        ax.text(xj, y_inside, "Z0 step", color="0.45", ha="center", va="top",
+                fontsize=7, style="italic")
 
 
 def animate_propagation(tl, run_result, meas_name, meas_label, title,
                          gamma_s, gamma_l, save_path, fps=30, n_frames=240,
-                         window_periods=None, f0=None):
+                         window_periods=None, f0=None, segments=None):
     """Animate V(x,t) (top) and the measured signal building up over time
     (bottom) from the recorded FDTD snapshots.
     """
@@ -61,13 +77,15 @@ def animate_propagation(tl, run_result, meas_name, meas_label, title,
     fig, (ax_x, ax_t) = plt.subplots(2, 1, figsize=(10, 7.5),
                                       gridspec_kw={"height_ratios": [1.1, 1]})
     fig.suptitle(_wrap_title(title), fontsize=11, fontweight="bold")
-    if f0 is not None:
-        ax_x.set_title(_elec_length_note(f0, tl.v / C_LIGHT, tl.length), fontsize=8,
+    if f0 is not None and segments is not None:
+        ax_x.set_title(_elec_length_note(f0, segments), fontsize=8,
                         color="0.4", style="italic")
 
     line_x, = ax_x.plot([], [], color=LINE_COLOR, lw=1.8)
     ax_x.axvline(0, color=SOURCE_COLOR, ls="--", lw=1)
     ax_x.axvline(x[-1], color=LOAD_COLOR, ls="--", lw=1)
+    if getattr(tl, "junctions", None):
+        _draw_junctions(ax_x, tl.junctions, vmax * 0.95)
     ax_x.set_xlim(x[0], x[-1])
     ax_x.set_ylim(-vmax, vmax)
     ax_x.set_xlabel("position along cable x [m]")
@@ -117,7 +135,7 @@ def animate_propagation(tl, run_result, meas_name, meas_label, title,
 
 def animate_steady_state_loop(x, Vx_t, t, meas_t, title, gamma_s, gamma_l,
                                save_path, fps=30, meas_label="V_out", f0=None,
-                               vf=None, length=None):
+                               segments=None):
     """Loop the exact periodic steady state: spatial profile (top) and the
     measured waveform with a moving phase cursor (bottom).
     """
@@ -129,13 +147,16 @@ def animate_steady_state_loop(x, Vx_t, t, meas_t, title, gamma_s, gamma_l,
                                       gridspec_kw={"height_ratios": [1.1, 1]})
     fig.suptitle(_wrap_title(title + "  (steady state, looping)"), fontsize=11,
                  fontweight="bold")
-    if f0 is not None:
-        ax_x.set_title(_elec_length_note(f0, vf, length), fontsize=8,
+    if f0 is not None and segments is not None:
+        ax_x.set_title(_elec_length_note(f0, segments), fontsize=8,
                         color="0.4", style="italic")
 
     line_x, = ax_x.plot([], [], color=LINE_COLOR, lw=1.8)
     ax_x.axvline(0, color=SOURCE_COLOR, ls="--", lw=1)
     ax_x.axvline(x[-1], color=LOAD_COLOR, ls="--", lw=1)
+    if segments is not None and len(segments) > 1:
+        junctions = np.cumsum([s["length"] for s in segments])[:-1]
+        _draw_junctions(ax_x, junctions, vmax * 0.95)
     ax_x.set_xlim(x[0], x[-1])
     ax_x.set_ylim(-vmax, vmax)
     ax_x.set_xlabel("position along cable x [m]")
@@ -174,7 +195,7 @@ def animate_steady_state_loop(x, Vx_t, t, meas_t, title, gamma_s, gamma_l,
 def plot_steady_state_comparison(t, vs_t, vout_t, x, Vx_snapshots, snapshot_times,
                                   title, gamma_s, gamma_l, save_path,
                                   meas_label="V_out", t_unit_ns=True, f0=None,
-                                  vf=None, length=None):
+                                  segments=None):
     """Static figure: (top) measured output vs. source, source faded on a
     twin axis so both can be read at their own natural scale while time
     (and hence phase) stays directly comparable; (bottom) a filmstrip of
@@ -212,11 +233,15 @@ def plot_steady_state_comparison(t, vs_t, vout_t, x, Vx_snapshots, snapshot_time
                     label=f"t={tv*1e9:.0f} ns" if t_unit_ns else f"t={tv:.2e}s")
     ax_bot.axvline(0, color=SOURCE_COLOR, ls="--", lw=1)
     ax_bot.axvline(x[-1], color=LOAD_COLOR, ls="--", lw=1)
+    if segments is not None and len(segments) > 1:
+        junctions = np.cumsum([s["length"] for s in segments])[:-1]
+        ymax_bot = max(np.max(np.abs(Vx_snapshots)), 1e-9)
+        _draw_junctions(ax_bot, junctions, ymax_bot * 0.95)
     ax_bot.set_xlabel("position along cable x [m]")
     ax_bot.set_ylabel("V(x) [V]")
     bot_title = "spatial profile at several instants across one period"
-    if f0 is not None:
-        bot_title += "\n" + _elec_length_note(f0, vf, length)
+    if f0 is not None and segments is not None:
+        bot_title += "\n" + _elec_length_note(f0, segments)
     ax_bot.set_title(bot_title, fontsize=9, color="0.35")
     ax_bot.legend(fontsize=7, ncol=3, loc="upper right")
     ax_bot.grid(alpha=0.25)

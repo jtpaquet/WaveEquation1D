@@ -3,12 +3,19 @@
 1D transmission-line (telegrapher's equations) simulator that animates signal
 propagation and reflections on a 10 m RG58 BNC cable, for two real setups:
 
-1. **Rogowski coil -> 10 m RG58 -> RC low-pass filter**, comparing a strongly
-   mismatched filter (10 kΩ / 1 nF) against a near impedance-matched one
-   (50 Ω / 5 µF).
-2. **250 kHz / 500 mVpp square wave (op-amp output) -> 10 m RG58 -> 20 MΩ
-   DAQ input**, comparing no series (source) termination resistor, a 50 Ω
-   (matched) resistor, and a 40 Ω (partial match) resistor.
+1. **Rogowski coil -> 10 cm lead -> 10 m RG58 -> RC low-pass filter**,
+   comparing a strongly mismatched filter (10 kΩ / 1 nF) against a near
+   impedance-matched one (50 Ω / 5 µF).
+2. **250 kHz / 500 mVpp square wave (op-amp output) -> 10 m RG58 -> 10 cm
+   lead -> 20 MΩ DAQ input**, comparing a bare op-amp output (~5 Ω, no added
+   resistor) against a 50 Ω (matched) resistor and a 40 Ω (partial match)
+   resistor.
+
+Each scenario includes a short 10 cm stub of ordinary (non-coax) lead wire --
+at the coil's own leads for the Rogowski scenarios, or at the DAQ probe lead
+for the square-wave scenarios -- so you can see the extra small reflection
+where that stub's impedance meets the 50 Ω coax, not just at the two main
+interfaces.
 
 For each case it produces an animation of the wave bouncing back and forth
 between the two interfaces until it settles, an animation of the exact
@@ -24,27 +31,34 @@ L' dI/dt = -dV/dx - R' I
 C' dV/dt = -dI/dx
 ```
 
-on a uniform lossy line (Z0 = 50 Ω, velocity factor 0.66) with a leapfrog
-(Yee-type) finite-difference time-domain scheme. The two ends are closed by
-lumped elements (the coil's own R+L, the RC filter, the DAQ's input
-resistance, etc.). A subtlety: the boundary node's own capacitance (half of
-one grid cell) forms a *fast* local RC/RL time constant with the attached
-lumped resistor/inductor -- often faster than the simulation time step even
-though the step size satisfies the line's own CFL condition. Plain
-forward-Euler blows up there, so each boundary is advanced with an *exact*
-zero-order-hold discretization of its local linear ODE (`scipy.linalg.expm`),
-which is unconditionally stable regardless of the ratio between dt and the
+on a lossy line with a leapfrog (Yee-type) finite-difference time-domain
+scheme. A line can be a single uniform cable, or a *cascade* of segments of
+different characteristic impedance (used for the 10 cm lead-wire stubs) --
+segments share one spatial grid, and the impedance step at a junction
+produces a real, physically correct partial reflection automatically, no
+extra machinery needed. The two true ends are closed by lumped elements (the
+coil's own R+L, the RC filter, the DAQ's input resistance, etc.). A
+subtlety: the boundary node's own capacitance (half of one grid cell) forms
+a *fast* local RC/RL time constant with the attached lumped resistor/
+inductor -- often faster than the simulation time step even though the step
+size satisfies the line's own CFL condition. Plain forward-Euler blows up
+there, so each boundary is advanced with an *exact* zero-order-hold
+discretization of its local linear ODE (`scipy.linalg.expm`), which is
+unconditionally stable regardless of the ratio between dt and the
 boundary's own RC/RL time constant.
 
 `waveline/freqdomain.py` is an independent, closed-form phasor solver
-(standard transmission-line input-impedance / reflection-coefficient
-algebra) used to compute the *exact* periodic steady state -- for the square
-wave this is done by taking the FFT of the actual (finite-rise-time) source
-waveform and running each harmonic through the line's transfer function, then
-re-summing in time. This is what the FDTD transient settles down to, and is
-much cheaper/exact to compute directly rather than by waiting out the
-transient. The two solvers are cross-checked against each other in
-`tests/test_physics.py` (agreement to <1%).
+(standard transmission-line input-impedance / reflection-coefficient chain
+algebra, also generalized to a cascade of segments) used to compute the
+*exact* periodic steady state -- for the square wave this is done by taking
+the FFT of the actual (finite-rise-time) source waveform and running each
+harmonic through the line's transfer function, then re-summing in time. This
+is what the FDTD transient settles down to, and is much cheaper/exact to
+compute directly rather than by waiting out the transient. The two solvers
+are cross-checked against each other in `tests/test_physics.py` (agreement
+to <1%), which also checks the cascade math directly: a step reflecting off
+an internal Z0 junction between two matched terminations settles, with no
+ringing, to the exact classic resistive-divider value.
 
 Both solvers are built from the *same* scenario parameters in
 `waveline/scenarios.py`, so the transient animation and the steady-state
@@ -81,8 +95,22 @@ comparison are always describing the same circuit.
   behavior on the edges is fully visible.
 - **DAQ input**: modeled as a simple 20 MΩ resistor to ground (no input
   capacitance specified, so none assumed).
-- **Op-amp output**: modeled as an ideal (0 Ω, non-inductive) voltage source
-  in series with whichever external resistor (0, 40 or 50 Ω) is being tested.
+- **Op-amp output**: modeled as an ideal, non-inductive voltage source in
+  series with whichever external resistor (5, 40 or 50 Ω) is being tested.
+  The "no added resistor" case uses 5 Ω rather than a literal 0 Ω, since a
+  real op-amp's closed-loop output stage always has *some* small nonzero
+  output impedance at this frequency -- 0 Ω isn't physically achievable, and
+  changes the ringing decay rate a little (see below).
+- **Lead-wire stubs**: 10 cm of generic unshielded two-conductor wire (not
+  coax), assumed Z0 = 200 Ω, velocity factor 0.7, somewhat lossier than the
+  coax -- a placeholder for whatever the coil's own pigtail or the DAQ probe
+  lead actually is, since that wasn't specified. Change `LEAD_Z0`/`LEAD_VF`/
+  `LEAD_LENGTH` in `scenarios.py` if you know the real figures. At these
+  frequencies 10 cm is a very small fraction of a wavelength even for the
+  square wave's harmonics, so its effect is a small, fast blip right at the
+  edge/transition rather than a major reshaping of the signal -- but it's a
+  real, physically distinct reflection point and is marked as such
+  ("Z0 step") in the plots.
 
 ## Usage
 
@@ -90,7 +118,7 @@ comparison are always describing the same circuit.
 pip install -r requirements.txt
 python run_simulation.py --list                     # see all scenarios
 python run_simulation.py                              # generate everything (~5-10 min)
-python run_simulation.py --scenario square_none_0     # just one
+python run_simulation.py --scenario square_low_5      # just one
 python run_simulation.py --fast                          # coarser/quicker preview
 ```
 
@@ -132,11 +160,11 @@ edge has significant harmonic content up into the MHz range, where the cable
 is a much larger fraction of a wavelength), so their spatial panels do show
 a visibly traveling wavefront.
 
-**Ringing on the square wave:** with no series resistor, both ends are
-close to total reflectors (Γ_source ≈ -1 from the near-zero op-amp output
-impedance, Γ_load ≈ +1 from the high-Z DAQ input), so each edge rings for
-many round trips (period ≈ 2 x cable transit time ≈ 200 ns) before settling
--- a textbook illustration of why series/source termination matters. A 50 Ω
+**Ringing on the square wave:** with no added series resistor (bare ~5 Ω
+op-amp output), both ends are close to total reflectors (Γ_source ≈ -0.82,
+Γ_load ≈ +1 from the high-Z DAQ input), so each edge rings for many round
+trips (period ≈ 2 x cable transit time ≈ 200 ns) before settling -- a
+textbook illustration of why series/source termination matters. A 50 Ω
 series resistor makes the source match the line exactly (Γ_source = 0), so
 each edge reflects once off the open load and is fully absorbed on the way
 back -- no ringing. 40 Ω is a partial match: a small, quickly-decaying

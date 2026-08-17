@@ -26,6 +26,31 @@ def atten_db_per_m(f):
     return (ATTEN_DB_PER_100M_AT_1MHZ / 100.0) * np.sqrt(np.abs(f) / ATTEN_F_REF)
 
 
+def cable_segment(length=CABLE_LENGTH):
+    return dict(length=length, Z0=Z0, vf=VF,
+                atten_db_per_m_ref=ATTEN_DB_PER_100M_AT_1MHZ / 100.0, f_ref=ATTEN_F_REF)
+
+
+# ------------------------------------------------------- short lead wires ---
+# Optional short (10 cm) stubs of plain (non-coax) wire/pigtail spliced onto
+# each end -- e.g. the coil's own leads before the BNC connector, or a DAQ
+# probe lead before the actual high-Z input pin. These aren't specified by
+# the user's part numbers, so treated as generic unshielded hookup wire: a
+# higher characteristic impedance than 50 ohm coax (wider/looser conductor
+# spacing), a velocity factor typical of simple PVC/PTFE insulation, and a
+# somewhat lossier attenuation figure. All three are easy to change below.
+LEAD_LENGTH = 0.10       # m (10 cm)
+LEAD_Z0 = 200.0          # ohm, generic unshielded two-conductor lead
+LEAD_VF = 0.7
+LEAD_ATTEN_DB_PER_100M_AT_1MHZ = 8.0
+
+
+def lead_segment(length=LEAD_LENGTH):
+    return dict(length=length, Z0=LEAD_Z0, vf=LEAD_VF,
+                atten_db_per_m_ref=LEAD_ATTEN_DB_PER_100M_AT_1MHZ / 100.0,
+                f_ref=ATTEN_F_REF)
+
+
 # ------------------------------------------------------------- Rogowski ----
 F_SINE = 250e3
 COIL_TURNS = 80
@@ -96,7 +121,11 @@ SQUARE_RISE_TIME = 20e-9
 
 SERIES_R_VARIANTS = {
     "matched_50": dict(Rs=50.0, label="50 Ω series resistor (matched)"),
-    "none_0": dict(Rs=0.0, label="no series resistor (0 Ω, ideal op-amp out)"),
+    # No *added* resistor -- but a real op-amp's closed-loop output stage
+    # still has some small nonzero output impedance at this frequency;
+    # ~5 Ohm is a representative generic-op-amp figure (not 0 Ohm, which
+    # would be an idealization no real device achieves).
+    "low_5": dict(Rs=5.0, label="5 Ω series resistor (bare op-amp output, no added resistor)"),
     "partial_40": dict(Rs=40.0, label="40 Ω series resistor (partial match)"),
 }
 

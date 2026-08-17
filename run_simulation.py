@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """Generate transmission-line reflection/standing-wave visualizations for:
 
-  Rogowski coil -> 10 m RG58 -> RC low-pass filter
+  Rogowski coil -> 10 cm lead -> 10 m RG58 -> RC low-pass filter
     rogowski_10k1nF   R=10k, C=1nF   (strongly mismatched load)
     rogowski_50_5uF   R=50,  C=5uF   (near impedance-matched load)
 
-  250 kHz / 500 mVpp square wave op-amp output -> 10 m RG58 -> 20 MOhm DAQ
-    square_none_0     no series resistor  (both ends near total reflection)
+  250 kHz / 500 mVpp square wave op-amp output -> 10 m RG58 -> 10 cm lead -> 20 MOhm DAQ
+    square_low_5      no *added* resistor (~5 ohm bare op-amp output)
     square_matched_50 50 ohm series resistor (source-side matched)
     square_partial_40 40 ohm series resistor (partial match)
+
+Each scenario includes a short (10 cm) non-coax lead-wire stub at the coil
+(source) end for the Rogowski scenarios, or at the DAQ (load) end for the
+square-wave scenarios -- see waveline/scenarios.py's LEAD_* constants for the
+assumed impedance/velocity of that stub. The impedance step where the lead
+meets the 50 ohm coax is itself a (small) reflection point, marked in the
+plots.
 
 For each scenario this produces, in --outdir:
   <name>_reflections.gif    transient FDTD animation: watch the wave
@@ -44,11 +51,12 @@ def _build_rogowski(variant):
     ZL_of_f = sc.rc_ZL_of_f(variant)
     tap = sc.rc_tap_divider(variant)
     label = sc.LPF_VARIANTS[variant]["label"]
-    title = f"Rogowski coil signal through 10 m RG58 -> {label}"
+    title = f"Rogowski coil signal through 10 cm lead + 10 m RG58 -> {label}"
+    segments = [sc.lead_segment(), sc.cable_segment()]
     return dict(source=source, load=load, Zs_of_f=Zs_of_f, ZL_of_f=ZL_of_f,
                 tap=tap, title=title, f0=sc.F_SINE, is_sine=True,
                 vs_func=sc.coil_vs, vs_amp=sc.V_COIL_AMP, meas_name="Vout",
-                meas_label="V_out (RC tap)")
+                meas_label="V_out (RC tap)", segments=segments)
 
 
 def _build_square(variant):
@@ -57,17 +65,18 @@ def _build_square(variant):
     Zs_of_f = sc.square_Zs_of_f(variant)
     ZL_of_f = sc.daq_ZL_of_f
     label = sc.SERIES_R_VARIANTS[variant]["label"]
-    title = f"500 mVpp 250 kHz square wave through 10 m RG58 -> 20 MΩ DAQ, {label}"
+    title = f"500 mVpp 250 kHz square wave through 10 m RG58 + 10 cm lead -> 20 MΩ DAQ, {label}"
+    segments = [sc.cable_segment(), sc.lead_segment()]
     return dict(source=source, load=load, Zs_of_f=Zs_of_f, ZL_of_f=ZL_of_f,
                 tap=None, title=title, f0=sc.F_SQUARE, is_sine=False,
                 vs_func=sc.square_vs, vs_amp=sc.SQUARE_AMP, meas_name="Va",
-                meas_label="V_DAQ (line end)")
+                meas_label="V_DAQ (after lead)", segments=segments)
 
 
 SCENARIOS = {
     "rogowski_10k1nF": lambda: _build_rogowski("10k_1nF"),
     "rogowski_50_5uF": lambda: _build_rogowski("50_5uF"),
-    "square_none_0": lambda: _build_square("none_0"),
+    "square_low_5": lambda: _build_square("low_5"),
     "square_matched_50": lambda: _build_square("matched_50"),
     "square_partial_40": lambda: _build_square("partial_40"),
 }
@@ -77,17 +86,19 @@ def gamma_at_f0(cfg):
     f0 = cfg["f0"]
     Zs = cfg["Zs_of_f"](f0)
     ZL = cfg["ZL_of_f"](f0)
-    return (Zs - sc.Z0) / (Zs + sc.Z0), (ZL - sc.Z0) / (ZL + sc.Z0)
+    Z0_source_side = cfg["segments"][0]["Z0"]
+    Z0_load_side = cfg["segments"][-1]["Z0"]
+    return ((Zs - Z0_source_side) / (Zs + Z0_source_side),
+            (ZL - Z0_load_side) / (ZL + Z0_load_side))
 
 
 def make_steady_state(cfg, n_points_x=161):
-    x = np.linspace(0, sc.CABLE_LENGTH, n_points_x)
-    atten_ref = sc.atten_db_per_m(1e6)  # reference figure quoted at 1 MHz
+    total_length = sum(s["length"] for s in cfg["segments"])
+    x = np.linspace(0, total_length, n_points_x)
     if cfg["is_sine"]:
         ss = fd.steady_state_sine(cfg["f0"], cfg["vs_amp"], cfg["Zs_of_f"], cfg["ZL_of_f"],
-                                   sc.Z0, sc.VF, sc.CABLE_LENGTH, x,
-                                   atten_db_per_m_ref=atten_ref, f_ref=1e6,
-                                   tap_divider=cfg["tap"])
+                                   None, None, None, x, tap_divider=cfg["tap"],
+                                   segments=cfg["segments"])
         f0 = cfg["f0"]
         t_snap = np.linspace(0, 1.0 / f0, 6, endpoint=False)
         Vx_snap = np.imag(ss["V_x_phasor"][:, None] * np.exp(1j * 2 * np.pi * f0 * t_snap)[None, :]).T
@@ -97,9 +108,9 @@ def make_steady_state(cfg, n_points_x=161):
         vout_key = "Vout_t"
     else:
         ss = fd.steady_state_square(cfg["f0"], cfg["vs_func"], cfg["Zs_of_f"], cfg["ZL_of_f"],
-                                     sc.Z0, sc.VF, sc.CABLE_LENGTH, x,
-                                     atten_db_per_m_ref=atten_ref, f_ref=1e6,
-                                     n_max=161, tap_divider=cfg["tap"], n_time=1600)
+                                     None, None, None, x, n_max=161,
+                                     tap_divider=cfg["tap"], n_time=1600,
+                                     segments=cfg["segments"])
         f0 = cfg["f0"]
         t_full = ss["t"]
         idx6 = np.linspace(0, len(t_full) // 2 - 1, 6).astype(int)  # one period's worth
@@ -113,7 +124,7 @@ def make_steady_state(cfg, n_points_x=161):
     return x, ss, t_snap, Vx_snap, t_loop, Vx_loop, meas_t_loop, vout_key
 
 
-def process_scenario(name, outdir, n_seg=200, n_periods=None, n_frames=200, fps=30,
+def process_scenario(name, outdir, target_dx=0.02, n_periods=None, n_frames=200, fps=30,
                       skip_transient=False, skip_loop=False, skip_static=False):
     cfg = SCENARIOS[name]()
     print(f"[{name}] {cfg['title']}")
@@ -124,10 +135,12 @@ def process_scenario(name, outdir, n_seg=200, n_periods=None, n_frames=200, fps=
     if n_periods is None:
         n_periods = 12 if cfg["is_sine"] else 8
 
+    total_length = sum(s["length"] for s in cfg["segments"])
+    n_seg = max(100, int(round(total_length / target_dx)))
+
     if not skip_transient:
-        tl = lines.TLineFDTD(sc.Z0, sc.VF, sc.CABLE_LENGTH, cfg["source"], cfg["load"],
-                              n_seg=n_seg, cfl=0.9,
-                              atten_db_per_m=sc.atten_db_per_m(cfg["f0"]))
+        tl = lines.TLineFDTD(source=cfg["source"], load=cfg["load"], n_seg=n_seg,
+                              cfl=0.9, segments=cfg["segments"])
         t_end = n_periods / cfg["f0"]
         n_steps = int(np.ceil(t_end / tl.dt))
         snapshot_every = max(1, n_steps // n_frames)
@@ -139,7 +152,7 @@ def process_scenario(name, outdir, n_seg=200, n_periods=None, n_frames=200, fps=
         path = os.path.join(outdir, f"{name}_reflections.gif")
         pl.animate_propagation(tl, res, cfg["meas_name"], cfg["meas_label"],
                                 cfg["title"], gamma_s, gamma_l, path, fps=fps,
-                                n_frames=n_frames, f0=cfg["f0"])
+                                n_frames=n_frames, f0=cfg["f0"], segments=cfg["segments"])
         print(f"    wrote {path}")
 
     x, ss, t_snap, Vx_snap, t_loop, Vx_loop, meas_t_loop, vout_key = make_steady_state(cfg)
@@ -149,7 +162,7 @@ def process_scenario(name, outdir, n_seg=200, n_periods=None, n_frames=200, fps=
         pl.animate_steady_state_loop(x, Vx_loop, t_loop, meas_t_loop, cfg["title"],
                                       gamma_s, gamma_l, path, fps=fps,
                                       meas_label=cfg["meas_label"], f0=cfg["f0"],
-                                      vf=sc.VF, length=sc.CABLE_LENGTH)
+                                      segments=cfg["segments"])
         print(f"    wrote {path}")
 
     if not skip_static:
@@ -167,7 +180,7 @@ def process_scenario(name, outdir, n_seg=200, n_periods=None, n_frames=200, fps=
         pl.plot_steady_state_comparison(t_cmp, vs_cmp, vout_cmp, x, Vx_snap, t_snap,
                                          cfg["title"], gamma_s, gamma_l, path,
                                          meas_label=cfg["meas_label"], f0=f0,
-                                         vf=sc.VF, length=sc.CABLE_LENGTH)
+                                         segments=cfg["segments"])
         print(f"    wrote {path}")
 
 
@@ -193,12 +206,14 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     names = [args.scenario] if args.scenario else list(SCENARIOS)
 
-    n_seg = 90 if args.fast else 200
+    # target_dx is chosen so the 10 cm lead stub still gets a handful of
+    # grid cells (not just the main 10 m cable's resolution)
+    target_dx = 0.05 if args.fast else 0.02
     n_frames = 100 if args.fast else 200
     fps = 24 if args.fast else 30
 
     for name in names:
-        process_scenario(name, args.outdir, n_seg=n_seg, n_frames=n_frames, fps=fps,
+        process_scenario(name, args.outdir, target_dx=target_dx, n_frames=n_frames, fps=fps,
                           skip_transient=args.skip_transient,
                           skip_loop=args.skip_loop,
                           skip_static=args.skip_static)
